@@ -1,0 +1,56 @@
+name: Review Gate
+on:
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  check-review:
+    if: github.event.issue.pull_request || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number
+              ? context.issue.number
+              : context.payload.pull_request.number;
+
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo, pull_number: prNumber
+            });
+            const headSha = pr.head.sha;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: prNumber, per_page: 100
+            });
+            const texts = [pr.body || '', ...comments.map(c => c.body || '')];
+            const found = texts.some(t =>
+              t.includes(`REVIEWED-COMMIT: ${headSha}`)
+            );
+
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: headSha,
+              state: found ? 'success' : 'failure',
+              context: 'ai-review',
+              description: found
+                ? 'พบรีวิว AI สำหรับ commit ล่าสุดแล้ว'
+                : 'ยังไม่มีรีวิว AI สำหรับ commit ล่าสุด'
+            });
+
+            if (!found) {
+              // กันบอทคอมเมนต์ซ้ำรัว ๆ: เช็คก่อนว่าเคยเตือนสำหรับ head SHA นี้ไปแล้วหรือยัง
+              const marker = `<!-- review-gate-warning:${headSha} -->`;
+              const alreadyWarned = comments.some(c => (c.body || '').includes(marker));
+
+              if (!alreadyWarned) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: prNumber,
+                  body: `${marker}\n❌ **ยังไม่พบรีวิว AI สำหรับ commit ล่าสุด** (\`${headSha.slice(0,7)}\`)\n\nกรุณารัน \`/review\` ในเครื่อง แล้ว copy ผลรีวิว (รวมบรรทัด REVIEWED-COMMIT) มาแปะเป็นคอมเมนต์ใน PR นี้`
+                });
+              }
+            }
